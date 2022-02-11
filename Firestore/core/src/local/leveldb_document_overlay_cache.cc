@@ -75,11 +75,21 @@ void LevelDbDocumentOverlayCache::SaveOverlays(
 }
 
 void LevelDbDocumentOverlayCache::RemoveOverlaysForBatchId(int batch_id) {
-  ForEachOverlay([&](absl::string_view leveldb_key, Overlay&& overlay) {
-    if (overlay.largest_batch_id() == batch_id) {
-      db_->current_transaction()->Delete(leveldb_key);
+  const std::string index_prefix_key =
+      LevelDbDocumentOverlayLargestBatchIdIndexKey::KeyPrefix(user_id_,
+                                                              batch_id);
+  auto index_it = db_->current_transaction()->NewIterator();
+  for (index_it->Seek(index_prefix_key);
+       index_it->Valid() && absl::StartsWith(index_it->key(), index_prefix_key);
+       index_it->Next()) {
+    LevelDbDocumentOverlayLargestBatchIdIndexKey leveldb_index_key;
+    if (!leveldb_index_key.Decode(index_it->key())) {
+      HARD_FAIL("LevelDbDocumentOverlayLargestBatchIdIndexKey failed to parse");
     }
-  });
+    db_->current_transaction()->Delete(index_it->key());
+    db_->current_transaction()->Delete(
+        leveldb_index_key.document_overlays_key());
+  }
 }
 
 DocumentOverlayCache::OverlayByDocumentKeyMap
@@ -160,9 +170,32 @@ void LevelDbDocumentOverlayCache::SaveOverlay(int largest_batch_id,
                                               const DocumentKey& key,
                                               const Mutation& mutation) {
   const std::string leveldb_key = LevelDbDocumentOverlayKey::Key(user_id_, key);
-  Overlay overlay(largest_batch_id, mutation);
-  auto serialized_overlay = serializer_->EncodeDocumentOverlay(overlay);
-  db_->current_transaction()->Put(leveldb_key, serialized_overlay);
+
+  // Delete the entry from the "largest_batch_id" index for the overlay.
+  {
+    auto overlay_opt = GetOverlay(key);
+    if (overlay_opt) {
+      const std::string leveldb_index_key =
+          LevelDbDocumentOverlayLargestBatchIdIndexKey::Key(
+              user_id_, overlay_opt->largest_batch_id(), leveldb_key);
+      db_->current_transaction()->Delete(leveldb_index_key);
+    }
+  }
+
+  // Put the overlay into the database.
+  {
+    Overlay overlay(largest_batch_id, mutation);
+    auto serialized_overlay = serializer_->EncodeDocumentOverlay(overlay);
+    db_->current_transaction()->Put(leveldb_key, serialized_overlay);
+  }
+
+  // Put an entry into the "largest_batch_id" index for the overlay.
+  {
+    const std::string leveldb_index_key =
+        LevelDbDocumentOverlayLargestBatchIdIndexKey::Key(
+            user_id_, largest_batch_id, leveldb_key);
+    db_->current_transaction()->Put(leveldb_index_key, "");
+  }
 }
 
 void LevelDbDocumentOverlayCache::ForEachOverlay(

@@ -57,6 +57,11 @@ class DocumentOverlayCacheTestBase : public testing::Test {
   void SaveOverlaysWithSetMutations(int largest_batch_id,
                                     const std::vector<std::string>& keys);
 
+  void ExpectCacheContainsOverlaysFor(const std::vector<std::string>& keys);
+
+  void ExpectCacheDoesNotContainOverlaysFor(
+      const std::vector<std::string>& keys);
+
   std::unique_ptr<Persistence> persistence_;
   DocumentOverlayCache* cache_ = nullptr;
 };

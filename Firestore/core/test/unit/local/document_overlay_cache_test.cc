@@ -76,6 +76,24 @@ void DocumentOverlayCacheTestBase::SaveOverlaysWithSetMutations(
   this->cache_->SaveOverlays(largest_batch_id, data);
 }
 
+void DocumentOverlayCacheTestBase::ExpectCacheContainsOverlaysFor(
+    const std::vector<std::string>& keys) {
+  for (const std::string& key : keys) {
+    SCOPED_TRACE(absl::StrCat("key=", key));
+    const DocumentKey document_key = DocumentKey::FromPathString(key);
+    EXPECT_TRUE(this->cache_->GetOverlay(document_key));
+  }
+}
+
+void DocumentOverlayCacheTestBase::ExpectCacheDoesNotContainOverlaysFor(
+    const std::vector<std::string>& keys) {
+  for (const std::string& key : keys) {
+    SCOPED_TRACE(absl::StrCat("key=", key));
+    const DocumentKey document_key = DocumentKey::FromPathString(key);
+    EXPECT_FALSE(this->cache_->GetOverlay(document_key));
+  }
+}
+
 DocumentOverlayCacheTest::DocumentOverlayCacheTest()
     : DocumentOverlayCacheTestBase(GetParam()()) {
 }
@@ -263,6 +281,67 @@ TEST_P(DocumentOverlayCacheTest,
 
     SCOPED_TRACE("verify overlay");
     VerifyOverlayContains(overlays, {"coll/doc1", "coll/doc2", "coll/doc3"});
+  });
+}
+
+TEST_P(DocumentOverlayCacheTest, OverwriteEntryUpdatesIndexes) {
+  this->persistence_->Run("Test", [&] {
+    Mutation mutation1 = PatchMutation("coll/doc1", Map("foo", "bar"));
+    this->SaveOverlaysWithMutations(2, {mutation1});
+    Mutation mutation2 = PatchMutation("coll/doc1", Map("biz", "baz"));
+    this->SaveOverlaysWithMutations(3, {mutation2});
+
+    this->cache_->RemoveOverlaysForBatchId(3);
+    ASSERT_FALSE(
+        this->cache_->GetOverlay(DocumentKey::FromPathString("coll/doc1")));
+
+    // Add a new overlay for the same document and ensure that removing the
+    // original batch ID with which it was associated has no effects. This
+    // verifies that overwriting removes the old index entry (something I had
+    // forgotten in my initial implementation).
+    Mutation mutation3 = PatchMutation("coll/doc1", Map("xxx", "yyy"));
+    this->SaveOverlaysWithMutations(4, {mutation3});
+    this->cache_->RemoveOverlaysForBatchId(2);
+    ASSERT_TRUE(
+        this->cache_->GetOverlay(DocumentKey::FromPathString("coll/doc1")));
+  });
+}
+
+TEST_P(DocumentOverlayCacheTest, IndexLoadTest) {
+  this->persistence_->Run("Test", [&] {
+    Mutation mutation1a = PatchMutation("coll/doc1a", Map("foo", "bar"));
+    Mutation mutation1b = PatchMutation("coll/doc1b", Map("foo", "bar"));
+    this->SaveOverlaysWithMutations(1, {mutation1a, mutation1b});
+    Mutation mutation2a = PatchMutation("coll/doc2a", Map("foo", "bar"));
+    Mutation mutation2b = PatchMutation("coll/doc2b", Map("foo", "bar"));
+    this->SaveOverlaysWithMutations(2, {mutation2a, mutation2b});
+    Mutation mutation3a = PatchMutation("coll/doc3a", Map("foo", "bar"));
+    Mutation mutation3b = PatchMutation("coll/doc3b", Map("foo", "bar"));
+    this->SaveOverlaysWithMutations(3, {mutation3a, mutation3b});
+
+    {
+      SCOPED_TRACE("RemoveOverlaysForBatchId(2)");
+      this->cache_->RemoveOverlaysForBatchId(2);
+      this->ExpectCacheContainsOverlaysFor(
+          {"coll/doc1a", "coll/doc1b", "coll/doc3a", "coll/doc3b"});
+      this->ExpectCacheDoesNotContainOverlaysFor({"coll/doc2a", "coll/doc2b"});
+    }
+
+    {
+      SCOPED_TRACE("RemoveOverlaysForBatchId(3)");
+      this->cache_->RemoveOverlaysForBatchId(3);
+      this->ExpectCacheContainsOverlaysFor({"coll/doc1a", "coll/doc1b"});
+      this->ExpectCacheDoesNotContainOverlaysFor(
+          {"coll/doc2a", "coll/doc2b", "coll/doc3a", "coll/doc3b"});
+    }
+
+    {
+      SCOPED_TRACE("RemoveOverlaysForBatchId(1)");
+      this->cache_->RemoveOverlaysForBatchId(1);
+      this->ExpectCacheDoesNotContainOverlaysFor({"coll/doc1a", "coll/doc1b",
+                                                  "coll/doc2a", "coll/doc2b",
+                                                  "coll/doc3a", "coll/doc3b"});
+    }
   });
 }
 
