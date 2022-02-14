@@ -56,6 +56,8 @@ const char* kIndexEntriesTable = "index_entries";
 const char* kDocumentOverlaysTable = "document_overlays";
 const char* kDocumentOverlaysLargestBatchIdIndexTable =
     "document_overlays_largest_batch_id_index";
+const char* kDocumentOverlaysCollectionIndexTable =
+    "document_overlays_collection_index";
 
 /**
  * Labels for the components of keys. These serve to make keys self-describing.
@@ -132,6 +134,11 @@ enum ComponentLabel {
 
   /** A key in LevelDb; used to refer to another entry in a LevelDb database. */
   LevelDbKey = 22,
+
+  /**
+   * A marker that simly denotes that everything leading up to this point in
+   * the stream must be matched exactly. */
+  ExactMatchMarker = 23,
 
   /**
    * A path segment describes just a single segment in a resource path. Path
@@ -247,6 +254,12 @@ class Reader {
    * All matched path segments are assembled into a ResourcePath.
    */
   ResourcePath ReadResourcePath();
+
+  /**
+   * The same as `ReadResourcePath()`, except that it will not match
+   * subcollections when used as a prefix.
+   */
+  ResourcePath ReadResourcePathExactMatch();
 
   /**
    * Reads component labels and strings from the key until it finds a component
@@ -479,6 +492,14 @@ ResourcePath Reader::ReadResourcePath() {
   return ResourcePath{std::move(path_segments)};
 }
 
+ResourcePath Reader::ReadResourcePathExactMatch() {
+  ResourcePath resource_path = ReadResourcePath();
+  if (!ReadComponentLabelMatching(ComponentLabel::ExactMatchMarker)) {
+    Fail();
+  }
+  return resource_path;
+}
+
 DocumentKey Reader::ReadDocumentKey() {
   ResourcePath path = ReadResourcePath();
 
@@ -697,6 +718,11 @@ class Writer {
       WriteComponentLabel(ComponentLabel::PathSegment);
       OrderedCode::WriteString(&dest_, segment);
     }
+  }
+
+  void WriteResourcePathExactMatch(const ResourcePath& path) {
+    WriteResourcePath(path);
+    WriteComponentLabel(ComponentLabel::ExactMatchMarker);
   }
 
   void WriteIndexId(int32_t id) {
@@ -1305,6 +1331,52 @@ bool LevelDbDocumentOverlayLargestBatchIdIndexKey::Decode(
   Reader reader{key};
   reader.ReadTableNameMatching(kDocumentOverlaysLargestBatchIdIndexTable);
   user_id_ = reader.ReadUserId();
+  largest_batch_id_ = reader.ReadBatchId();
+  document_overlays_key_ = reader.ReadLevelDbKey();
+  reader.ReadTerminator();
+  return reader.ok();
+}
+
+std::string LevelDbDocumentOverlayCollectionIndexKey::KeyPrefix() {
+  Writer writer;
+  writer.WriteTableName(kDocumentOverlaysCollectionIndexTable);
+  return writer.result();
+}
+
+std::string LevelDbDocumentOverlayCollectionIndexKey::KeyPrefix(absl::string_view user_id, const model::ResourcePath& collection) {
+  Writer writer;
+  writer.WriteTableName(kDocumentOverlaysCollectionIndexTable);
+  writer.WriteUserId(user_id);
+  writer.WriteResourcePathExactMatch(collection);
+  return writer.result();
+}
+
+std::string LevelDbDocumentOverlayCollectionIndexKey::KeyPrefix(absl::string_view user_id, const model::ResourcePath& collection, model::BatchId largest_batch_id) {
+  Writer writer;
+  writer.WriteTableName(kDocumentOverlaysCollectionIndexTable);
+  writer.WriteUserId(user_id);
+  writer.WriteResourcePathExactMatch(collection);
+  writer.WriteBatchId(largest_batch_id);
+  return writer.result();
+}
+
+std::string LevelDbDocumentOverlayCollectionIndexKey::Key(absl::string_view user_id, const model::ResourcePath& collection, model::BatchId largest_batch_id, absl::string_view document_overlays_key) {
+  Writer writer;
+  writer.WriteTableName(kDocumentOverlaysCollectionIndexTable);
+  writer.WriteUserId(user_id);
+  writer.WriteResourcePathExactMatch(collection);
+  writer.WriteBatchId(largest_batch_id);
+  writer.WriteLevelDbKey(document_overlays_key);
+  writer.WriteTerminator();
+  return writer.result();
+}
+
+bool LevelDbDocumentOverlayCollectionIndexKey::Decode(
+    absl::string_view key) {
+  Reader reader{key};
+  reader.ReadTableNameMatching(kDocumentOverlaysCollectionIndexTable);
+  user_id_ = reader.ReadUserId();
+  collection_ = reader.ReadResourcePathExactMatch();
   largest_batch_id_ = reader.ReadBatchId();
   document_overlays_key_ = reader.ReadLevelDbKey();
   reader.ReadTerminator();

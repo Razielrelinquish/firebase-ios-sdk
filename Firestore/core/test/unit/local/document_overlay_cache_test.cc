@@ -43,6 +43,7 @@ using credentials::User;
 using model::DocumentKey;
 using model::Mutation;
 using model::ResourcePath;
+using model::mutation::Overlay;
 using ::testing::UnorderedElementsAreArray;
 using testutil::DeleteMutation;
 using testutil::Map;
@@ -210,10 +211,29 @@ TEST_P(DocumentOverlayCacheTest, GetAllOverlaysForCollection) {
     Mutation m5 = SetMutation("other/doc1", Map("foo", "bar"));
     this->SaveOverlaysWithMutations(3, {m1, m2, m3, m4, m5});
 
-    const auto overlays = this->cache_->GetOverlays(ResourcePath{"coll"}, -1);
+    {
+      SCOPED_TRACE("verify collection overlay");
+      const auto overlays = this->cache_->GetOverlays(ResourcePath{"coll"}, -1);
+      VerifyOverlayContains(overlays, {"coll/doc1", "coll/doc2", "coll/doc3"});
+    }
 
-    SCOPED_TRACE("verify overlay");
-    VerifyOverlayContains(overlays, {"coll/doc1", "coll/doc2", "coll/doc3"});
+    {
+      SCOPED_TRACE("verify subcollection overlay");
+      const auto overlays = this->cache_->GetOverlays(ResourcePath{"coll", "doc1", "sub"}, -1);
+      VerifyOverlayContains(overlays, {"coll/doc1/sub/sub_doc"});
+    }
+
+    {
+      SCOPED_TRACE("verify no incorrect matches of collection name prefixes 1");
+      const auto overlays = this->cache_->GetOverlays(ResourcePath{"collZZZ"}, -1);
+      VerifyOverlayContains(overlays, {});
+    }
+
+    {
+      SCOPED_TRACE("verify no incorrect matches of collection name prefixes 2");
+      const auto overlays = this->cache_->GetOverlays(ResourcePath{"c"}, -1);
+      VerifyOverlayContains(overlays, {});
+    }
   });
 }
 
@@ -284,26 +304,46 @@ TEST_P(DocumentOverlayCacheTest,
   });
 }
 
-TEST_P(DocumentOverlayCacheTest, OverwriteEntryUpdatesIndexes) {
+TEST_P(DocumentOverlayCacheTest, OverwriteEntryUpdatesLargetsBatchIdIndex) {
   this->persistence_->Run("Test", [&] {
     Mutation mutation1 = PatchMutation("coll/doc1", Map("foo", "bar"));
-    this->SaveOverlaysWithMutations(2, {mutation1});
+    this->SaveOverlaysWithMutations(100, {mutation1});
     Mutation mutation2 = PatchMutation("coll/doc1", Map("biz", "baz"));
-    this->SaveOverlaysWithMutations(3, {mutation2});
+    this->SaveOverlaysWithMutations(101, {mutation2});
 
-    this->cache_->RemoveOverlaysForBatchId(3);
-    ASSERT_FALSE(
+    const DocumentKey document_key = DocumentKey::FromPathString("coll/doc1");
+    this->cache_->RemoveOverlaysForBatchId(101);
+    ASSERT_FALSE(this->cache_->GetOverlay(document_key));
+
+    // Add a new overlay for the same document and ensure that removing the
+    // original batch ID with which it was associated has no effects. This
+    // verifies that overwriting an overlay in the database removes the old
+    // index entry (something I had forgotten in my initial implementation).
+    Mutation mutation3 = PatchMutation("coll/doc1", Map("xxx", "yyy"));
+    this->SaveOverlaysWithMutations(200, {mutation3});
+    this->cache_->RemoveOverlaysForBatchId(1);
+    ASSERT_TRUE(
         this->cache_->GetOverlay(DocumentKey::FromPathString("coll/doc1")));
+  });
+}
+
+TEST_P(DocumentOverlayCacheTest, OverwriteEntryUpdatesCollectionIndex) {
+  this->persistence_->Run("Test", [&] {
+    Mutation mutation1 = PatchMutation("coll/doc1", Map("foo", "bar"));
+    this->SaveOverlaysWithMutations(100, {mutation1});
+    Mutation mutation2 = PatchMutation("coll/doc1", Map("biz", "baz"));
+    this->SaveOverlaysWithMutations(101, {mutation2});
+
+    const DocumentKey document_key = DocumentKey::FromPathString("coll/doc1");
+    this->cache_->RemoveOverlaysForBatchId(101);
+    ASSERT_FALSE(this->cache_->GetOverlay(document_key));
 
     // Add a new overlay for the same document and ensure that removing the
     // original batch ID with which it was associated has no effects. This
     // verifies that overwriting removes the old index entry (something I had
     // forgotten in my initial implementation).
-    Mutation mutation3 = PatchMutation("coll/doc1", Map("xxx", "yyy"));
-    this->SaveOverlaysWithMutations(4, {mutation3});
-    this->cache_->RemoveOverlaysForBatchId(2);
-    ASSERT_TRUE(
-        this->cache_->GetOverlay(DocumentKey::FromPathString("coll/doc1")));
+    const auto overlays = this->cache_->GetOverlays(ResourcePath{"coll"}, -1);
+    ASSERT_EQ(overlays.size(), 0);
   });
 }
 
